@@ -1,0 +1,22 @@
+# Secrets — never commit tokens
+Token.txt
+TOKEN.txt
+token.txt
+*.token
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+uv.lock
