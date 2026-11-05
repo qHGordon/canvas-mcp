@@ -9,6 +9,9 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 
 from .client import CanvasAPIError, CanvasClient, CanvasConfigError, load_config
+from . import crawl
+from . import grading as grading_mod
+from . import report
 from . import formatters as fmt
 
 mcp = MCPServer("canvas-mcp")
@@ -99,6 +102,35 @@ async def list_assignments(
 
 
 @mcp.tool()
+async def get_assignment_status(course_id: int | None = None) -> dict[str, Any]:
+    """Determine real assignment submission status from Canvas submission objects.
+
+    Use this — not list_modules — to answer "did I submit / is it graded".
+    Module completion (module_view_progress) only reflects browsing progress and
+    says nothing about submission. Status is computed in Python from the
+    submission object, never inferred, into one of five values:
+
+      not_submitted (未完成) / submitted_ungraded (已提交·未出分) /
+      graded (已出分) / excused (已豁免) / unknown (无法判断)
+
+    A missing/overdue not_submitted carries an "overdue" flag; a late submission
+    a "late" flag. Pass course_id for one course, omit it to scan all active
+    courses.
+
+    Returns {assignments: [...], unmatched_assignment_files: [...], errors: [...]}.
+    unmatched_assignment_files lists module File items that look like assignment
+    handouts but have no matching Canvas assignment — Canvas offers no submission
+    entry for them, so their status cannot be judged.
+    """
+    try:
+        return await crawl.build_assignment_status(
+            get_client(), _now_utc(), course_id=course_id
+        )
+    except CanvasAPIError as exc:
+        return _error(exc)
+
+
+@mcp.tool()
 async def get_upcoming_deadlines(days: int = 14) -> dict[str, Any]:
     """Aggregate assignments due within the next N days across all active courses, sorted by due date."""
     client = get_client()
@@ -163,7 +195,13 @@ async def list_announcements(
 
 @mcp.tool()
 async def list_modules(course_id: int, raw: bool = False) -> list[dict[str, Any]] | dict[str, Any]:
-    """List a course's modules and their items (type, title, url, completion state)."""
+    """List a course's modules and their items (type, title, url).
+
+    Each module carries ``module_view_progress`` and each item an
+    ``item_view_progress`` field. WARNING: module_view_progress only reflects
+    browsing progress, NOT assignment submission. To determine whether an
+    assignment has been submitted, you MUST call get_assignment_status.
+    """
     try:
         modules = await get_client().get_paginated(
             f"/api/v1/courses/{course_id}/modules",
@@ -286,6 +324,141 @@ async def get_calendar_events(days: int = 14, raw: bool = False) -> dict[str, An
     if errors:
         result["partial_errors"] = errors
     return result
+
+
+@mcp.tool()
+async def get_course_progress(course_id: int | None = None) -> dict[str, Any]:
+    """Return pre-computed grade progress (floor / ceiling / graded average /
+    how much is needed for each target) for one course or all active courses.
+
+    The numbers come straight from each course's computed progress.json. You
+    MUST use the scores and percentages from this tool verbatim — do not compute
+    or estimate grades yourself. Weights come only from a confirmed grading.json;
+    courses without one are returned with status "unconfirmed".
+    """
+    saved = report.load_all_progress()
+    want = [p for p in saved
+            if course_id is None or p.get("course_id") == course_id]
+    if not want:
+        try:
+            want = await report.refresh_progress(
+                get_client(), _now_utc(), course_id=course_id
+            )
+        except CanvasAPIError as exc:
+            return _error(exc)
+    summary = report.text_summary(want)
+    if course_id is not None:
+        one = next((p for p in want if p.get("course_id") == course_id), None)
+        if one is None:
+            return {"error": f"找不到 course_id {course_id} 的进度数据。"}
+        return {"progress": one, "summary": summary}
+    return {"progress": want, "summary": summary}
+
+
+@mcp.tool()
+async def propose_grading_change(course_id: int, instruction: str) -> dict[str, Any]:
+    """Parse a natural-language grading change into a validated patch and PREVIEW
+    its effect — without writing anything.
+
+    Returns a patch_id plus a diff and the impact on progress, or a clarification
+    question when the instruction is ambiguous. The patch is staged under
+    data/courses/<code>/pending/ and expires after 24 hours. To actually apply
+    it, call apply_grading_change(patch_id) — but ONLY after the user has
+    explicitly confirmed they want this change.
+    """
+    now = _now_utc()
+    try:
+        course = await report.get_course(get_client(), course_id)
+    except CanvasAPIError as exc:
+        return _error(exc)
+    if not course:
+        return {"error": f"找不到 active 课程 {course_id}。"}
+    res = await report.prepare_amendment(get_client(), course, instruction, now)
+    if not res["ok"]:
+        return {"ok": False, "clarification": res.get("clarification"),
+                "error": res.get("error")}
+    patch_id = grading_mod.new_patch_id()
+    code = course.get("course_code")
+    grading_mod.save_pending(code, {
+        "patch_id": patch_id,
+        "course_id": course_id,
+        "course_code": code,
+        "created_at": now.isoformat(),
+        "instruction": instruction,
+        "patch": res["patch"],
+        "diff": res["diff"],
+        "impact": res["impact"],
+    })
+    return {
+        "ok": True,
+        "patch_id": patch_id,
+        "diff": res["diff"],
+        "impact": res["impact"],
+        "note": "预览而已，尚未写入。只有在用户明确回复确认之后，才能调用 "
+                "apply_grading_change(patch_id)。",
+    }
+
+
+@mcp.tool()
+async def apply_grading_change(patch_id: str) -> dict[str, Any]:
+    """Apply a previously proposed grading change, then recompute and re-render.
+
+    Call this ONLY after the user has explicitly confirmed the change previewed
+    by propose_grading_change. Re-validates against the current config before
+    writing; rejects expired (>24h) or already-consumed patches.
+    """
+    now = _now_utc()
+    payload = grading_mod.load_pending(patch_id)
+    if not payload:
+        return {"error": f"找不到补丁 {patch_id}（可能已应用或已过期）。"}
+    if grading_mod.is_pending_expired(payload, now):
+        grading_mod.delete_pending(payload["course_code"], patch_id)
+        return {"error": f"补丁 {patch_id} 已过期（超过 24 小时），请重新 propose。"}
+    try:
+        course = await report.get_course(get_client(), payload["course_id"])
+    except CanvasAPIError as exc:
+        return _error(exc)
+    if not course:
+        return {"error": f"找不到 active 课程 {payload['course_id']}。"}
+    code = course.get("course_code")
+    confirmed = grading_mod.load_grading(code)
+    if not confirmed:
+        return {"error": f"{code} 没有已确认的 grading.json。"}
+    assignments = await report.course_assignments_brief_cached(
+        get_client(), payload["course_id"]
+    )
+    try:
+        new_grading, _ = grading_mod.apply_patch(
+            confirmed, payload["patch"], assignments
+        )
+    except grading_mod.PatchError as exc:
+        return {"error": str(exc)}
+    results = await report.commit_amendment(
+        get_client(), course, new_grading, payload["instruction"], payload["patch"], now
+    )
+    grading_mod.delete_pending(code, patch_id)
+    one = next((p for p in results if p.get("course_id") == payload["course_id"]), None)
+    return {"ok": True, "progress": one, "summary": report.text_summary(results)}
+
+
+@mcp.tool()
+async def undo_grading_change(course_id: int) -> dict[str, Any]:
+    """Undo the most recent confirmed grading change for a course, then recompute
+    and re-render. Reverts to the previous history snapshot."""
+    now = _now_utc()
+    try:
+        course = await report.get_course(get_client(), course_id)
+    except CanvasAPIError as exc:
+        return _error(exc)
+    if not course:
+        return {"error": f"找不到 active 课程 {course_id}。"}
+    code = course.get("course_code")
+    restored = grading_mod.undo_last(code)
+    if restored is None:
+        return {"ok": False, "message": "没有可撤销的修改（只剩确认基线或无 history）。"}
+    results = await report.refresh_progress(get_client(), now, course_id=course_id)
+    one = next((p for p in results if p.get("course_id") == course_id), None)
+    return {"ok": True, "progress": one, "summary": report.text_summary(results)}
 
 
 def main() -> None:

@@ -7,13 +7,23 @@
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import Any
 from zoneinfo import ZoneInfo
 
-LOCAL_TZ = ZoneInfo("America/Toronto")
+# Local display timezone; override with CANVAS_TZ (IANA name, e.g. "America/New_York").
+LOCAL_TZ = ZoneInfo(os.environ.get("CANVAS_TZ", "").strip() or "America/Toronto")
+
+WEEKDAY_ZH = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+
+def weekday_zh(dt: datetime) -> str:
+    """周X for a date (Monday=周一). Always derive the weekday from the date —
+    never hand-write it."""
+    return WEEKDAY_ZH[dt.weekday()]
 
 _BLOCK_TAGS = {
     "p", "div", "br", "li", "ul", "ol", "table", "tr", "h1", "h2", "h3",
@@ -130,7 +140,11 @@ def slim_announcement(a: dict[str, Any]) -> dict[str, Any]:
 
 
 def slim_module(m: dict[str, Any]) -> dict[str, Any]:
-    out = pick(m, "id", "name", "position", "state", "completed_at")
+    out = pick(m, "id", "name", "position", "completed_at")
+    # Canvas 的 module ``state`` 只代表浏览进度，不代表作业提交。改名以杜绝误用；
+    # 判断作业提交状态必须调用 get_assignment_status。
+    if m.get("state") is not None:
+        out["module_view_progress"] = m["state"]
     items = m.get("items")
     if isinstance(items, list):
         out["items"] = [slim_module_item(i) for i in items]
@@ -139,10 +153,13 @@ def slim_module(m: dict[str, Any]) -> dict[str, Any]:
 
 def slim_module_item(i: dict[str, Any]) -> dict[str, Any]:
     out = pick(i, "id", "title", "type", "html_url", "external_url", "page_url")
+    # completion_requirement 同样只是浏览进度，改名以免被当成提交状态。
     completion = i.get("completion_requirement")
     if isinstance(completion, dict):
-        out["completed"] = completion.get("completed", False)
-        out["completion_type"] = completion.get("type")
+        out["item_view_progress"] = {
+            "type": completion.get("type"),
+            "completed": completion.get("completed", False),
+        }
     return out
 
 

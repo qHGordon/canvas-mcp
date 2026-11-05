@@ -50,14 +50,14 @@ def test_with_local_times_adds_fields():
 
 def test_slim_course():
     raw = {
-        "id": 1, "name": "RL", "course_code": "APS1080",
+        "id": 1, "name": "RL", "course_code": "XYZ2002",
         "workflow_state": "available",
         "term": {"id": 9, "name": "2026 Fall", "sis_term_id": "x"},
         "uuid": "noise", "calendar": {"ics": "noise"},
     }
     slim = slim_course(raw)
     assert slim == {
-        "id": 1, "name": "RL", "course_code": "APS1080",
+        "id": 1, "name": "RL", "course_code": "XYZ2002",
         "workflow_state": "available", "term": "2026 Fall",
     }
 

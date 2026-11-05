@@ -152,9 +152,35 @@ async def test_list_modules_items_completion(canvas_env):
         )
     )
     result = await server.list_modules(1)
-    item = result[0]["items"][0]
-    assert item["completed"] is True
+    mod = result[0]
+    # state is renamed to make clear it is only browsing progress
+    assert mod["module_view_progress"] == "started"
+    assert "state" not in mod
+    item = mod["items"][0]
+    assert item["item_view_progress"] == {"type": "must_view", "completed": True}
+    assert "completed" not in item
     assert item["type"] == "Page"
+
+
+@respx.mock
+async def test_get_assignment_status_tool_computes_status(canvas_env):
+    respx.get(f"{BASE}/api/v1/courses").mock(
+        return_value=httpx.Response(200, json=[{"id": 1, "name": "RL"}])
+    )
+    respx.get(f"{BASE}/api/v1/courses/1/students/submissions").mock(
+        return_value=httpx.Response(200, json=[{
+            "submitted_at": iso_in(-2), "score": None, "grade": None,
+            "assignment": {"id": 9, "name": "A1",
+                           "submission_types": ["online_upload"]},
+        }])
+    )
+    respx.get(f"{BASE}/api/v1/courses/1/modules").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    result = await server.get_assignment_status()
+    assert result["assignments"][0]["status"] == "submitted_ungraded"
+    assert result["assignments"][0]["status_zh"] == "已提交·未出分"
+    assert result["unmatched_assignment_files"] == []
 
 
 @respx.mock

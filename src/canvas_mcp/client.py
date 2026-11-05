@@ -104,6 +104,11 @@ class CanvasClient:
         response = await self._request(path, params)
         return response.json()
 
+    async def get_bytes(self, url: str, params: dict[str, Any] | None = None) -> bytes:
+        """GET raw bytes (e.g. a file download). Same retry/error handling."""
+        response = await self._request(url, params)
+        return response.content
+
     async def get_paginated(
         self, path: str, params: dict[str, Any] | None = None
     ) -> list[Any]:
