@@ -1,0 +1,8 @@
+@echo off
+REM Copy to scripts\local_env.cmd (git-ignored) and fill in your own values.
+REM Keep the token file and notify.env OUTSIDE the repository.
+set "CANVAS_BASE_URL=https://canvas.example.edu"
+set "CANVAS_TOKEN_FILE=C:\path\outside\repo\Token.txt"
+set "NOTIFY_ENV=C:\path\outside\repo\notify.env"
+REM Optional: display timezone (IANA name). Default America/Toronto.
+REM set "CANVAS_TZ=America/Toronto"
