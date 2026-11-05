@@ -6,6 +6,8 @@ token.txt
 .env
 .env.*
 !.env.example
+notify.env
+!notify.env.example
 
 # Crawl output (personal course data)
 data/
@@ -17,6 +19,10 @@ __pycache__/
 .venv/
 dist/
 build/
+
+# Machine-specific config (paths to your token / notify.env)
+scripts/local_env.cmd
+.claude/
 
 # Tooling
 .pytest_cache/
